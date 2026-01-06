@@ -367,7 +367,14 @@ class MainWindow(QMainWindow):
         lbl_enc = QLabel("Encoder Strategy")
         lbl_enc.setObjectName("caption")
         self.combo_gpu = QComboBox()
-        self.combo_gpu.addItems(["Auto-Detect", "CPU (libx264)", "NVIDIA (h264_nvenc)", "AMD (h264_amf)", "Intel (h264_qsv)"])
+        self.combo_gpu.addItems([
+            "Auto-Detect", 
+            "CPU (libx264)", 
+            "NVIDIA (h264_nvenc)", 
+            "AMD (h264_amf)", 
+            "Intel (h264_qsv)",
+            "Apple Silicon (h264_videotoolbox)"
+        ])
         self.combo_gpu.setCursor(Qt.PointingHandCursor)
         grid.addWidget(lbl_enc, 0, 0)
         grid.addWidget(self.combo_gpu, 1, 0)

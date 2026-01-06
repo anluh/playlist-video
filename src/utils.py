@@ -42,8 +42,13 @@ def detect_gpu():
     Returns a preferred video codec string for FFmpeg (e.g., 'h264_nvenc', 'h264_amf', or 'libx264').
     """
     system = platform.system()
+    if system == "Darwin":
+        if _check_encoder("h264_videotoolbox"):
+            return "h264_videotoolbox"
+        return "libx264"
+
     if system != "Windows":
-        return "libx264" # Fallback for non-windows for this MVP
+        return "libx264" # Linux fallback
 
     try:
         import wmi
