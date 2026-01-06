@@ -300,6 +300,36 @@ class FileListWidget(QListWidget):
         else:
             super().dropEvent(event)
 
+class DropLineEdit(QLineEdit):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+        self.setPlaceholderText("C:/Path/To/Root/Folder (Drop Here)")
+
+    def dragEnterEvent(self, event: QDragEnterEvent):
+        if event.mimeData().hasUrls():
+            event.accept()
+        else:
+            super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.setDropAction(Qt.CopyAction)
+            event.accept()
+        else:
+            super().dragMoveEvent(event)
+
+    def dropEvent(self, event: QDropEvent):
+        if event.mimeData().hasUrls():
+            urls = event.mimeData().urls()
+            if urls:
+                path = urls[0].toLocalFile()
+                if os.path.isdir(path):
+                    self.setText(path)
+                    event.accept()
+        else:
+            super().dropEvent(event)
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -524,8 +554,8 @@ class MainWindow(QMainWindow):
         b_layout.addWidget(QLabel("Select a root folder containing multiple project subfolders."))
         
         batch_input_layout = QHBoxLayout()
-        self.line_batch_input = QLineEdit()
-        self.line_batch_input.setPlaceholderText("C:/Path/To/Root/Folder")
+        self.line_batch_input = DropLineEdit()
+        self.line_batch_input.setPlaceholderText("C:/Path/To/Root/Folder (Drop Here)")
         self.line_batch_input.setReadOnly(True)
         
         btn_browse = QPushButton("Select Folder")
@@ -632,26 +662,37 @@ class MainWindow(QMainWindow):
         elif choice == 2: encoder = "h264_nvenc"
         elif choice == 3: encoder = "h264_amf"
         elif choice == 4: encoder = "h264_qsv"
+        elif choice == 5: encoder = "h264_videotoolbox"
+        else: encoder = "libx264"
         
+        sep_files = self.chk_separate.isChecked()
+
         common_settings = {
             "gpu_encoder": encoder,
-            "separate_files": self.chk_separate.isChecked(),
+            "separate_files": sep_files,
             "playlist_repeat": self.spin_repeat.value()
         }
         
         if current_tab_index == 0:
-            if not self.video_path:
-                QMessageBox.warning(self, "Missing Video", "Please select a background video loop.")
-                return
+            # === SINGLE MODE ===
             if not self.audio_files:
                 QMessageBox.warning(self, "Missing Audio", "Please add at least one audio file.")
                 return
 
-            if self.chk_separate.isChecked():
+            if sep_files:
+                if not self.video_path:
+                    QMessageBox.warning(self, "Missing Video", "Cannot use 'Separate File per Track' without a video background.\n\nPlease add a video or uncheck 'Separate File per Track' for Audio Only output.")
+                    return
+
                 out_path = QFileDialog.getExistingDirectory(self, "Select Output Folder")
                 if not out_path: return
             else:
-                out_path, _ = QFileDialog.getSaveFileName(self, "Save Video As", "output.mp4", "MP4 Video (*.mp4)")
+                # If No Video -> Audio Only (.mp3)
+                if not self.video_path:
+                    out_path, _ = QFileDialog.getSaveFileName(self, "Save Audio As", "output.mp3", "MP3 Audio (*.mp3)")
+                else:
+                    out_path, _ = QFileDialog.getSaveFileName(self, "Save Video As", "output.mp4", "MP4 Video (*.mp4)")
+                
                 if not out_path: return
             
             # Reconstruct ordered list
@@ -671,11 +712,53 @@ class MainWindow(QMainWindow):
             settings["audio_paths"] = ordered_audio
 
         else:
+            # === BATCH MODE ===
             batch_root = self.line_batch_input.text()
             if not batch_root or not os.path.isdir(batch_root):
                 QMessageBox.warning(self, "Invalid Input", "Please select a valid Batch Root folder.")
                 return
             
+            # --- VALIDATION STEP ---
+            video_exts = ('.mp4', '.mov', '.avi', '.mkv', '.webm')
+            subfolders = [f.path for f in os.scandir(batch_root) if f.is_dir()]
+            
+            folders_no_video = []
+            
+            for folder in subfolders:
+                has_video = False
+                for root, dirs, files in os.walk(folder):
+                    for f in files:
+                        if f.lower().endswith(video_exts):
+                            has_video = True
+                            break
+                    if has_video: break
+                
+                if not has_video:
+                    folders_no_video.append(os.path.basename(folder))
+            
+            # Logic Rule: If Separate Video Checked AND No Video in folder -> Alert & Stop
+            if sep_files:
+                if folders_no_video:
+                    msg = "The following folders have NO VIDEO, but 'Separate File per Track' is checked:\n\n"
+                    msg += "\n".join(folders_no_video[:10])
+                    if len(folders_no_video) > 10: msg += "\n..."
+                    msg += "\n\nCannot proceed in Separate File mode without a video source for every folder."
+                    QMessageBox.critical(self, "Batch Error", msg)
+                    return
+            else:
+                # Logic Rule: If Combined Mode AND No Video -> Warn & Continue?
+                if folders_no_video:
+                    msg = "The following folders have NO VIDEO and will be rendered as AUDIO ONLY (.mp3):\n\n"
+                    msg += "\n".join(folders_no_video[:10])
+                    if len(folders_no_video) > 10: msg += "\n..."
+                    msg += "\n\nDo you want to continue?"
+                    
+                    reply = QMessageBox.question(self, "Missing Videos", msg, 
+                                                 QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+                    
+                    if reply == QMessageBox.No:
+                        return
+
             out_path = QFileDialog.getExistingDirectory(self, "Select Output Folder for Batch")
             if not out_path: return
             
@@ -695,7 +778,7 @@ class MainWindow(QMainWindow):
         self.bar_current.setVisible(True)
         self.bar_current.setValue(0)
         this_green = "#0F9D58"
-        self.bar_current.setStyleSheet(f"QProgressBar::chunk {{ background-color: {this_green}; }}") # Dynamic styling test
+        self.bar_current.setStyleSheet(f"QProgressBar::chunk {{ background-color: {this_green}; }}")
         
         if current_tab_index == 1: 
             self.bar_batch.setVisible(True)

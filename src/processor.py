@@ -78,9 +78,6 @@ class RenderThread(QThread):
                     elif f_lower.endswith(audio_exts):
                         audio_paths.append(path)
             
-            if not video_path:
-                self.progress_update.emit(f"Skipping {folder_name}: No video found.")
-                continue
             if not audio_paths:
                 self.progress_update.emit(f"Skipping {folder_name}: No audio found.")
                 continue
@@ -90,6 +87,12 @@ class RenderThread(QThread):
             
             # Process
             if separate_files:
+                if not video_path:
+                     # This should have been caught by UI validation if Separate Files is ON.
+                     # But as a fallback/safety, we skip or error.
+                     self.progress_update.emit(f"Skipping {folder_name}: No video for separate file mode.")
+                     continue
+
                 # Create subfolder in output for this project
                 project_out_dir = os.path.join(output_root, folder_name)
                 os.makedirs(project_out_dir, exist_ok=True)
@@ -97,8 +100,10 @@ class RenderThread(QThread):
                 # Render Separate Tracks
                 self._render_separate(project_out_dir, video_path, audio_paths, gpu_encoder, batch_prefix=f"[{i+1}/{total_folders}] ")
             else:
-                # Combined Mode -> One file named FolderName.mp4
-                output_file = os.path.join(output_root, f"{folder_name}.mp4")
+                # Combined Mode -> One file named FolderName.mp4 OR FolderName.mp3
+                ext = ".mp4" if video_path else ".mp3"
+                output_file = os.path.join(output_root, f"{folder_name}{ext}")
+                
                 # For combined mode, this single file represents 100% of the CURRENT task
                 # Passed repeat_count
                 self._render_single(output_file, video_path, audio_paths, gpu_encoder, batch_mode=True, progress_scale=100, repeat_count=repeat_count)
@@ -151,6 +156,13 @@ class RenderThread(QThread):
     def _render_separate(self, output_dir, video_path, audio_paths, gpu_encoder, batch_prefix=""):
         from src.utils import get_media_duration
         
+        if not video_path:
+             # Should not happen in Separate Files mode based on current validation rules,
+             # but implemented for robustness using .mp3 output.
+             ext = ".mp3"
+        else:
+             ext = ".mp4"
+
         total_tracks = len(audio_paths)
         # We divide the 100% progress bar into chunks for each track
         chunk_size = 100 / total_tracks
@@ -159,7 +171,7 @@ class RenderThread(QThread):
             track_name = os.path.splitext(os.path.basename(audio_path))[0]
             track_name_safe = "".join([c for c in track_name if c not in '<>:"/\\|?*']).strip()
             
-            output_file = os.path.join(output_dir, f"{track_name_safe}.mp4")
+            output_file = os.path.join(output_dir, f"{track_name_safe}{ext}")
             
             self.progress_update.emit(f"{batch_prefix}Rendering track {i+1}/{total_tracks}: {track_name}...")
             
@@ -167,19 +179,26 @@ class RenderThread(QThread):
             duration = get_media_duration(audio_path)
             
             cmd = ['ffmpeg', '-y']
-            cmd.extend(['-stream_loop', '-1', '-i', video_path])
-            cmd.extend(['-i', audio_path])
-            cmd.extend(['-map', '0:v', '-map', '1:a'])
             
-            if 'nvenc' in gpu_encoder:
-                cmd.extend(['-c:v', gpu_encoder, '-preset', 'p4', '-tune', 'hq'])
-            elif 'amf' in gpu_encoder:
-                cmd.extend(['-c:v', gpu_encoder, '-quality', 'balanced'])
-            else:
-                cmd.extend(['-c:v', 'libx264', '-preset', 'medium'])
+            if video_path:
+                cmd.extend(['-stream_loop', '-1', '-i', video_path])
+                cmd.extend(['-i', audio_path])
+                cmd.extend(['-map', '0:v', '-map', '1:a'])
                 
-            cmd.extend(['-c:a', 'aac', '-b:a', '192k'])
-            cmd.extend(['-shortest'])
+                if 'nvenc' in gpu_encoder:
+                    cmd.extend(['-c:v', gpu_encoder, '-preset', 'p4', '-tune', 'hq'])
+                elif 'amf' in gpu_encoder:
+                    cmd.extend(['-c:v', gpu_encoder, '-quality', 'balanced'])
+                else:
+                    cmd.extend(['-c:v', 'libx264', '-preset', 'medium'])
+                    
+                cmd.extend(['-c:a', 'aac', '-b:a', '192k'])
+                cmd.extend(['-shortest'])
+            else:
+                # Audio Only
+                cmd.extend(['-i', audio_path])
+                cmd.extend(['-c:a', 'libmp3lame', '-b:a', '192k'])
+            
             cmd.append(output_file)
             
             # Pass duration and offsets to run_ffmpeg
@@ -203,38 +222,56 @@ class RenderThread(QThread):
         # Construct FFmpeg command
         cmd = ['ffmpeg', '-y']
         
-        # Input 0: Video (Looped)
-        cmd.extend(['-stream_loop', '-1', '-i', video_path])
-        
-        # Inputs 1..N: Audio files (Multiplied)
-        for audio in final_audio_paths:
-            cmd.extend(['-i', audio])
-        
-        # Build Filter Complex
-        filter_complex = []
-        
-        # Audio Concatenation
-        # Note: Input 0 is video. Audio inputs start at 1.
-        audio_inputs = "".join([f"[{i+1}:a]" for i in range(len(final_audio_paths))])
-        filter_complex.append(f"{audio_inputs}concat=n={len(final_audio_paths)}:v=0:a=1[outa]")
-        
-        # Map video and audio
-        cmd.extend(['-filter_complex', ";".join(filter_complex)])
-        cmd.extend(['-map', '0:v', '-map', '[outa]'])
-        
-        # Encoding settings
-        if 'nvenc' in gpu_encoder:
-            cmd.extend(['-c:v', gpu_encoder, '-preset', 'p4', '-tune', 'hq'])
-        elif 'amf' in gpu_encoder:
-            cmd.extend(['-c:v', gpu_encoder, '-quality', 'balanced'])
-        else:
-            cmd.extend(['-c:v', 'libx264', '-preset', 'medium'])
+        if video_path:
+            # Input 0: Video (Looped)
+            cmd.extend(['-stream_loop', '-1', '-i', video_path])
             
-        cmd.extend(['-c:a', 'aac', '-b:a', '192k'])
+            # Inputs 1..N: Audio files (Multiplied)
+            for audio in final_audio_paths:
+                cmd.extend(['-i', audio])
+            
+            # Build Filter Complex
+            filter_complex = []
+            
+            # Audio Concatenation
+            # Note: Input 0 is video. Audio inputs start at 1.
+            audio_inputs = "".join([f"[{i+1}:a]" for i in range(len(final_audio_paths))])
+            filter_complex.append(f"{audio_inputs}concat=n={len(final_audio_paths)}:v=0:a=1[outa]")
+            
+            # Map video and audio
+            cmd.extend(['-filter_complex', ";".join(filter_complex)])
+            cmd.extend(['-map', '0:v', '-map', '[outa]'])
+            
+            # Encoding settings
+            if 'nvenc' in gpu_encoder:
+                cmd.extend(['-c:v', gpu_encoder, '-preset', 'p4', '-tune', 'hq'])
+            elif 'amf' in gpu_encoder:
+                cmd.extend(['-c:v', gpu_encoder, '-quality', 'balanced'])
+            else:
+                cmd.extend(['-c:v', 'libx264', '-preset', 'medium'])
+                
+            cmd.extend(['-c:a', 'aac', '-b:a', '192k'])
+            
+            # Cut video to shortest stream
+            cmd.extend(['-shortest'])
         
-        # Cut video to shortest stream
-        cmd.extend(['-shortest'])
-        
+        else:
+            # === AUDIO ONLY MODE ===
+            # Inputs 0..N: Audio files
+            for audio in final_audio_paths:
+                cmd.extend(['-i', audio])
+            
+            # Audio Only Filter Complex
+            if len(final_audio_paths) > 1:
+                audio_inputs = "".join([f"[{i}:a]" for i in range(len(final_audio_paths))])
+                cmd.extend(['-filter_complex', f"{audio_inputs}concat=n={len(final_audio_paths)}:v=0:a=1[outa]"])
+                cmd.extend(['-map', '[outa]'])
+            else:
+                # Single audio file, no complex filter needed really, but kept for consistency
+                pass 
+                
+            cmd.extend(['-c:a', 'libmp3lame', '-b:a', '192k'])
+
         # Output
         cmd.append(output_path)
         
